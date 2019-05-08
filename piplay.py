@@ -9,7 +9,7 @@ import vlc
 from IPython import embed
 
 HOST = "0.0.0.0"
-PORT = 7264
+PORT = 7263
 
 CMDLET = "---> "
 
@@ -57,7 +57,7 @@ def play(conn, vid):
         media = vlc_instance.media_new(vid.getbest().url)
         media.get_mrl()
         player.set_media(media)
-        embed()
+        #embed()
         player.play()
 
         # if there's nothing in the queue to play after this song, grab the autoplay up next from youtube

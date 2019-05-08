@@ -7,6 +7,13 @@ import threading
 import time
 import vlc
 
+# todo
+# volume improvements
+# skip should be able to skip to autoplay if nothing in queue
+# add a stop command to stop whatever is currently playing
+# autoplay needs to be worked on so it doesn't repeat
+# possibly try out mpv for streaming instead of VLC, potential performance impact? - this won't actually matter once we get new hardware
+
 HOST = "0.0.0.0"
 PORT = 7264
 
@@ -53,10 +60,15 @@ def play(conn, vid):
     global vlc_instance, player, connections
     try:
         # load url to stream in VLC
-        media = vlc_instance.media_new(vid.getbest().url)
+        stream = vid.getbest(preftype="webm")
+        media = ""
+        if stream is None:
+            media = vlc_instance.media_new(vid.getbest().url)
+        else:
+            media = vlc_instance.media_new(stream.url)
         media.get_mrl()
         player.set_media(media)
-        player.video_set_scale(20)
+        #player.video_set_scale(20)
         player.play()
         #player.set_fullscreen(True)
 
@@ -75,6 +87,7 @@ def cycle_queue():
     # loop every 7 seconds checking queue
     while True:
         time.sleep(7)
+        print("> Checking queue")
         # if no song is playing and there is something in the queue, play it
         if player.is_playing() == 0:
             if len(queue) > 0:
@@ -91,7 +104,7 @@ def handle_server(conn, addr):
     send(conn)
 
     global queue, player
-    m = alsaaudio.Mixer("PCM")
+    m = alsaaudio.Mixer(3)
     
     while True:
         try:
