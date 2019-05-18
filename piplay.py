@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2.7
 import alsaaudio
 import pafy
 import requests
@@ -6,10 +6,16 @@ import socket
 import threading
 import time
 import vlc
-from IPython import embed
+
+# TODO
+# volume improvements
+# skip should be able to skip to autoplay if nothing in queue
+# add a stop command to stop whatever is currently playing
+# autoplay needs to be worked on so it doesn't repeat, currently repeats after a few songs
+# running the skip command breaks the queue for some reason, look into this
 
 HOST = "0.0.0.0"
-PORT = 7263
+PORT = 2727
 
 CMDLET = "---> "
 
@@ -18,6 +24,7 @@ player = ""
 queue = []
 autoplay = ""
 connections = []
+active_timer = ""
 
 def send(conn, msg="", cmdlet=True):
     if not cmdlet:
@@ -51,33 +58,40 @@ def grab_autoplay(conn, url):
     autoplay = vid
 
 def play(conn, vid):
-    global vlc_instance, player, connections
+    global vlc_instance, player, connections, active_timer
     try:
         # load url to stream in VLC
-        media = vlc_instance.media_new(vid.getbest().url)
+        stream = vid.getbest(preftype="webm")
+        media = ""
+        if stream is None:
+            media = vlc_instance.media_new(vid.getbest().url)
+        else:
+            media = vlc_instance.media_new(stream.url)
         media.get_mrl()
         player.set_media(media)
-        #embed()
         player.play()
+        player.set_fullscreen(True)
+
+        # keep track of when songs were started so that a playlist will only run for 6 minutes before moving on in the queue
+        active_timer = time.time()
 
         # if there's nothing in the queue to play after this song, grab the autoplay up next from youtube
         if len(queue) == 0:
             grab_autoplay(conn, vid.watchv_url)
-
         for c in connections:
             send(c, "\nNow playing %s\nLength: %s" % (vid.title, vid.duration), False)
     except ValueError:
-        if conn:
+        if conn is not None:
             send(conn, "Invalid URL entered.", False)
 
 def cycle_queue():
-    global player, queue, autoplay
+    global player, queue, autoplay, active_timer
 
     # loop every 7 seconds checking queue
     while True:
         time.sleep(7)
         # if no song is playing and there is something in the queue, play it
-        if player.is_playing() == 0:
+        if player.is_playing() == 0 or (time.time() - active_timer > 360):
             if len(queue) > 0:
                 play(None, queue.pop(0))
             else:
@@ -109,7 +123,6 @@ def handle_server(conn, addr):
                 url = args[1]
                 try:
                     vid = pafy.new(url)
-                    
                     # if queue is empty and player is off, play
                     if len(queue) == 0 and player.is_playing() == 0:
                         play(conn, vid)
@@ -117,7 +130,7 @@ def handle_server(conn, addr):
                         # songs are queued or currently playing, add to queue
                         queue.append(vid)
                         send(conn, "Video added to queue.", False)
-                except ValueError:
+                except ValueError as e:
                     send(conn, "Invalid URL entered: %s" % (url), False)
 
             elif "playnow " in cmd:
