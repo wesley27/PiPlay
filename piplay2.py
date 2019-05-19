@@ -1,37 +1,39 @@
-#!/usr/bin/env python2.7
+#!/usr/bin/env python3
 import alsaaudio
-import pafy
+from lxml import etree
+import mpv
 import requests
 import socket
 import threading
 import time
-import vlc
+import urllib.request
 
-# todo
+# TODO
 # volume improvements
 # skip should be able to skip to autoplay if nothing in queue
 # add a stop command to stop whatever is currently playing
-# autoplay needs to be worked on so it doesn't repeat
-# possibly try out mpv for streaming instead of VLC, potential performance impact? - this won't actually matter once we get new hardware
+# autoplay needs to be worked on so it doesn't repeat, currently repeats after a few songs
+# running the skip command breaks the queue for some reason, look into this
 
 HOST = "0.0.0.0"
-PORT = 7264
+PORT = 2727
 
+VERSION = "1.1"
 CMDLET = "---> "
 
-vlc_instance = ""
 player = ""
 queue = []
 autoplay = ""
 connections = []
+active_timer = ""
 
 def send(conn, msg="", cmdlet=True):
     if not cmdlet:
-        conn.sendall("%s\n" % (msg))
+        conn.sendall(("%s\n" % (msg)).encode())
         if "Welcome" not in msg:
             send(conn)
     else:
-        conn.sendall("\n%s" % (CMDLET))
+        conn.sendall(("\n%s" % (CMDLET)).encode())
 
 def send_help(conn):
     HELPMSG = """The following commands exist:
@@ -42,7 +44,7 @@ def send_help(conn):
     \tvol <0-100>\t\t- Sets the volume level.
     \thelp\t\t\t- Shows this help message.
     \texit\t\t\t- Exits this PiPlay connection.\n"""
-    conn.sendall(HELPMSG)
+    conn.sendall(HELPMSG.encode())
 
 def grab_autoplay(conn, url):
     global autoplay
@@ -53,43 +55,40 @@ def grab_autoplay(conn, url):
     html = html[html.index("href"):html.index("href")+100]
     url = "https://www.youtube.com%s" % (html.split('"')[1])
 
-    vid = pafy.new(url)
-    autoplay = vid
+    autoplay = url
 
-def play(conn, vid):
-    global vlc_instance, player, connections
+def play(conn, url):
+    global player, connections, active_timer
     try:
-        # load url to stream in VLC
-        stream = vid.getbest(preftype="webm")
-        media = ""
-        if stream is None:
-            media = vlc_instance.media_new(vid.getbest().url)
-        else:
-            media = vlc_instance.media_new(stream.url)
-        media.get_mrl()
-        player.set_media(media)
-        #player.video_set_scale(20)
-        player.play()
-        #player.set_fullscreen(True)
+        # load url into mpv
+        player.play(url)
+        player.fullscreen = True
+
+        # keep track of when songs were started so that a playlist will only run for 6 minutes before moving on in the queue
+        active_timer = time.time()
+
+        # get song name cause mpv doesn't get it when streamed
+        link = etree.HTML(urllib.request.urlopen(url).read())
+        title = link.xpath("//span[@id='eow-title']/@title")
 
         # if there's nothing in the queue to play after this song, grab the autoplay up next from youtube
         if len(queue) == 0:
-            grab_autoplay(conn, vid.watchv_url)
+            grab_autoplay(conn, url)
         for c in connections:
-            send(c, "\nNow playing %s\nLength: %s" % (vid.title, vid.duration), False)
+            
+            send(c, "\nNow playing %s" % (''.join(title)), False)
     except ValueError:
-        if conn:
+        if conn is not None:
             send(conn, "Invalid URL entered.", False)
 
 def cycle_queue():
-    global player, queue, autoplay
+    global player, queue, autoplay, active_timer
 
     # loop every 7 seconds checking queue
     while True:
         time.sleep(7)
-        print("> Checking queue")
         # if no song is playing and there is something in the queue, play it
-        if player.is_playing() == 0:
+        if player.playtime_remaining is None or (time.time() - active_timer > 360):
             if len(queue) > 0:
                 play(None, queue.pop(0))
             else:
@@ -103,13 +102,13 @@ def handle_server(conn, addr):
     send_help(conn)
     send(conn)
 
-    global queue, player
-    m = alsaaudio.Mixer(3)
+    global player, queue
+    m = alsaaudio.Mixer()
     
     while True:
         try:
-            cmd = conn.recv(1024).strip()
-
+            cmd = str(conn.recv(1024).strip())
+            cmd = cmd[2:-1] # get rid of bytes identifier (screw python 3)
             if "play " in cmd:
                 # play music
                 args = cmd.split(" ")
@@ -119,42 +118,30 @@ def handle_server(conn, addr):
 
                 # obtain url
                 url = args[1]
-                try:
-                    vid = pafy.new(url)
-                    # if queue is empty and player is off, play
-                    if len(queue) == 0 and player.is_playing() == 0:
-                        play(conn, vid)
-                    else:
-                        # songs are queued or currently playing, add to queue
-                        queue.append(vid)
-                        send(conn, "Video added to queue.", False)
-                except ValueError as e:
-                    send(conn, "Invalid URL entered: %s" % (url), False)
+                # if queue is empty or nothing is playing, play now, otherwise queue it
+                if len(queue) == 0 and player.playtime_remaining is None:
+                        play(conn, url)
+                else:
+                    queue.append(url)
+                    send(conn, "Video added to queue.", False)
 
             elif "playnow " in cmd:
-                # stop and play
-                if player.is_playing() == 0:
-                    send(conn, "Player isn't currently playing anything. Try 'play <url>'.", False)
-                else:
-                    args = cmd.split(" ")
-                    if len(args) != 2:
-                        send(conn, "Invalid syntax.", False)
-                        continue
-                    
-                    # obtain url
-                    url = args[1]
-                    vid = pafy.new(url)
-
-                    play(conn, vid)
+                args = cmd.split(" ")
+                if len(args) != 2:
+                    send(conn, "Invalid syntax.", False)
+                    continue
+                
+                # stop whatever is currently playing and play
+                url = args[1]
+                player.play(conn, url)
 
             elif cmd == "skip":
                 # skips current song
-                if player.is_playing() == 0:
-                    send(conn, "Player isn't currently playing anything.")
-                elif len(queue) > 0:
-                    play(conn, queue.pop(0))
-                else:
+                elif len(queue) < 1:
                     send(conn, "Queue is empty, nothing to skip to.")
+                else:
+                    print("Skipping to next song.")
+                    play(conn, queue.pop(0))
 
             elif cmd == "queue":
                 # list songs in queue
@@ -162,8 +149,10 @@ def handle_server(conn, addr):
                     send(conn, "Queue is empty.", False)
                 else:
                     i = 1
-                    for vid in queue:
-                        conn.sendall("%d. %s (%s)\n" % (i, vid.title, vid.duration))
+                    for url in queue:
+                        link = etree.HTML(urllib.request.urlopen(url).read())
+                        title = link.xpath("//span[@id='eow-title']/@title")
+                        conn.sendall(("%d. %s\n" % (i, ''.join(title))).encode())
                         i += 1
                     send(conn)
 
@@ -195,7 +184,7 @@ def handle_server(conn, addr):
             else:
                 send(conn, "Invalid command entered.", False)
 
-        except socket.error, e:
+        except socket.error as e:
             if "Broken pipe" in str(e):
                 print("Connection from %s was forcibly closed by the client." % (addr[0]))
             break
@@ -208,14 +197,13 @@ def init_server():
     return s
 
 def run():
-    global vlc_instance, player, connections
-    vlc_instance = vlc.Instance()
-    player = vlc_instance.media_player_new()
+    global player, connections
+    player = mpv.MPV(ytdl=True)
 
     s = init_server()
     t = threading.Thread(target=cycle_queue)
     t.start()
-    print("PiPlay server initialized.")
+    print("PiPlay server v%s initialized." % (VERSION))
 
     while True:
         try:
